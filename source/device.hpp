@@ -66,8 +66,6 @@ struct HDevice {
 
 	bool encodedDevice = false;
 	bool rotatableDevice = false;
-	bool deviceHdrSignal = false;
-	bool reactivatePending = false;
 	bool initialized;
 	bool active;
 
@@ -75,16 +73,15 @@ struct HDevice {
 	EncodedData encodedAudio;
 
 	// handle insert/remove events
-	HANDLE msgEvt;
-	HANDLE exitEvt;
-	HANDLE msgThread;
-	IDeviceCallback *callback;
+	HANDLE mediaEvent = 0;
+	HANDLE exitEvent = 0;
+	HANDLE mediaEventThread = 0;
+	IDeviceCallback *callback = nullptr;
 
 	HDevice(IDeviceCallback *cb);
 	~HDevice();
 
 	// handle insert/remove events
-	static unsigned __stdcall EventThread(void *pParam);
 	void EventThreadInner();
 	bool ReadAllEvents();
 	void StartEventThread();

@@ -31,6 +31,9 @@
 #include <cfgmgr32.h> // for CM_xxx
 #include <algorithm>  // for std::transform
 
+#pragma comment(lib, "winmm.lib")    // for waveInMessage
+#pragma comment(lib, "setupapi.lib") // for SetupDixxx
+
 using namespace std;
 
 namespace DShow {
@@ -72,7 +75,7 @@ bool CreateFilterGraph(IGraphBuilder **pgraph, ICaptureGraphBuilder2 **pbuilder,
 	}
 
 	if (pevent) {
-		hr = graph->QueryInterface(IID_IMediaEventEx, (void **)&event);
+		hr = graph->QueryInterface(IID_IMediaEventEx, reinterpret_cast<void**>(event.Assign()));
 		if (FAILED(hr)) {
 			ErrorHR(L"Failed to get media event interface", hr);
 			return false;
@@ -665,19 +668,17 @@ static bool IsMonikerSameParentInstPath(IMoniker *moniker,
 		vidDevInstPath, vidParentDevInstPath,
 		_ARRAYSIZE(vidParentDevInstPath));
 
-	if (FAILED(hr))
-		return false;
-
 	/* Get audio parent device instance path */
 	wchar_t audParentDevInstPath[512];
-	hr = GetAudioCaptureParentDeviceInstancePath(
-		moniker, audParentDevInstPath,
-		_ARRAYSIZE(audParentDevInstPath));
+	if (SUCCEEDED(hr))
+		hr = GetAudioCaptureParentDeviceInstancePath(
+			moniker, audParentDevInstPath,
+			_ARRAYSIZE(audParentDevInstPath));
 
+	/* Compare audio and video parent device instance path */
 	if (FAILED(hr))
 		return false;
 
-	/* Compare audio and video parent device instance path */
 	return wcscmp(audParentDevInstPath, vidParentDevInstPath) == 0;
 }
 
@@ -696,11 +697,11 @@ static bool IsUncoupledDevice(const wchar_t *vidDevInstPath)
 	if (!vidDevInstPath)
 		return false;
 
-	const wstring path = vidDevInstPath;
+	wstring path = vidDevInstPath;
 
 	/* USB */
-	const wstring usbToken = L"USB\\VID_";
-	const wstring usbVidIdWhitelist[] = {
+	wstring usbToken = L"USB\\VID_";
+	wstring usbVidIdWhitelist[] = {
 		L"0FD9", /* elgato */
 		L"3842", /* evga */
 		L"0B05", /* asus */
@@ -708,8 +709,8 @@ static bool IsUncoupledDevice(const wchar_t *vidDevInstPath)
 
 	if (MatchingStartToken(path, usbToken)) {
 		/* Get USB vendor ID */
-		const wstring vid = path.substr(usbToken.size(), VEN_ID_SIZE);
-		for (const wstring &whitelistId : usbVidIdWhitelist) {
+		wstring vid = path.substr(usbToken.size(), VEN_ID_SIZE);
+		for (wstring &whitelistId : usbVidIdWhitelist) {
 			if (vid == whitelistId) {
 				return true;
 			}
@@ -717,18 +718,18 @@ static bool IsUncoupledDevice(const wchar_t *vidDevInstPath)
 	}
 
 	/* PCI */
-	const wstring pciVenToken = L"PCI\\VEN_";
-	const wstring pciSubsysToken = L"SUBSYS_";
-	const wstring pciVenIdWhitelist[] = {
+	wstring pciVenToken = L"PCI\\VEN_";
+	wstring pciSubsysToken = L"SUBSYS_";
+	wstring pciVenIdWhitelist[] = {
 		L"1CD7", /* magewell */
 	};
-	const wstring pciSubsysIdWhitelist[] = {
+	wstring pciSubsysIdWhitelist[] = {
 		L"1CFA", /* elgato */
 	};
 
 	if (MatchingStartToken(path, pciVenToken)) {
-		const wstring vid = path.substr(usbToken.size(), VEN_ID_SIZE);
-		for (const wstring &whitelistId : pciVenIdWhitelist) {
+		wstring vid = path.substr(usbToken.size(), VEN_ID_SIZE);
+		for (wstring &whitelistId : pciVenIdWhitelist) {
 			if (vid == whitelistId) {
 				return true;
 			}
@@ -741,10 +742,8 @@ static bool IsUncoupledDevice(const wchar_t *vidDevInstPath)
 
 		if (subsysPos != string::npos && path.size() >= expectedSize) {
 			/* Get PCI subsystem vendor ID */
-			const wstring ssid =
-				path.substr(subsysIdPos, VEN_ID_SIZE);
-			for (const wstring &whitelistId :
-			     pciSubsysIdWhitelist) {
+			wstring ssid = path.substr(subsysIdPos, VEN_ID_SIZE);
+			for (wstring &whitelistId : pciSubsysIdWhitelist) {
 				if (ssid == whitelistId) {
 					return true;
 				}
@@ -865,10 +864,10 @@ static bool MatchFriendlyNames(const wchar_t *vidName, const wchar_t *audName)
 
 	/* Remove 'video' from friendly name */
 	size_t posVid;
-	const wstring searchVid[] = {L"(video) ", L"(video)", L"video ",
-				     L"video",    L"hdmi",    L" / multiview"};
+	wstring searchVid[] = {L"(video) ", L"(video)", L"video ",
+			       L"video",    L"hdmi",    L" / multiview"};
 	for (int i = 0; i < _ARRAYSIZE(searchVid); i++) {
-		const wstring &search = searchVid[i];
+		wstring &search = searchVid[i];
 		while ((posVid = strVidName.find(search)) !=
 		       std::string::npos) {
 			strVidName.replace(posVid, search.length(), L"");
@@ -877,10 +876,9 @@ static bool MatchFriendlyNames(const wchar_t *vidName, const wchar_t *audName)
 
 	/* Remove 'audio' from friendly name */
 	size_t posAud;
-	const wstring searchAud[] = {L"(audio) ", L"(audio)", L"audio ",
-				     L"audio"};
+	wstring searchAud[] = {L"(audio) ", L"(audio)", L"audio ", L"audio"};
 	for (int i = 0; i < _ARRAYSIZE(searchAud); i++) {
-		const wstring &search = searchAud[i];
+		wstring &search = searchAud[i];
 		while ((posAud = strAudName.find(search)) !=
 		       std::string::npos) {
 			strAudName.replace(posAud, search.length(), L"");

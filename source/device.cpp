@@ -23,27 +23,18 @@
 #include "dshow-formats.hpp"
 #include "dshow-enum.hpp"
 #include "log.hpp"
+#include <array>
 
 #define ROCKET_WAIT_TIME_MS 5000
 
 namespace DShow {
 
-/* device-vendor.cpp API */
-extern bool IsVendorVideoHDR(IKsPropertySet *propertySet);
-extern void SetVendorVideoFormat(IKsPropertySet *propertySet,
-				 bool hevcTrueAvcFalse);
-extern void SetVendorTonemapperUsage(IBaseFilter *filter, bool enable);
-
 bool SetRocketEnabled(IBaseFilter *encoder, bool enable);
 
-HDevice::HDevice(IDeviceCallback *cb)
-	: initialized(false),
-	  active(false),
-	  callback(cb),
-	  msgEvt(0),
-	  msgThread(0)
+HDevice::HDevice(IDeviceCallback* cb)
+	: initialized(false), active(false), callback(cb)
 {
-	exitEvt = ::CreateEvent(NULL, TRUE, FALSE, NULL);
+	exitEvent = ::CreateEvent(NULL, TRUE, FALSE, NULL);
 }
 
 HDevice::~HDevice()
@@ -52,7 +43,7 @@ HDevice::~HDevice()
 		Stop();
 
 	StopEventThread();
-	CloseHandle(exitEvt);
+	CloseHandle(exitEvent);
 
 	DisconnectFilters();
 
@@ -70,9 +61,9 @@ HDevice::~HDevice()
 	}
 }
 
-unsigned __stdcall HDevice::EventThread(void *pParam)
+unsigned __stdcall EventThread(void *pParam)
 {
-	HDevice *self = reinterpret_cast<HDevice *>(pParam);
+	HDevice* self = static_cast<HDevice*>(pParam);
 	CoInitialize(nullptr);
 	self->EventThreadInner();
 	CoUninitialize();
@@ -81,26 +72,24 @@ unsigned __stdcall HDevice::EventThread(void *pParam)
 
 void HDevice::EventThreadInner()
 {
-	HANDLE events[] = {
-		exitEvt, // must be first one
-		msgEvt,
+	const std::array<HANDLE, 2> events = {
+		exitEvent, // must be first one
+		mediaEvent,
 	};
-
-	DWORD count = sizeof(events) / sizeof(HANDLE);
 
 	while (true) {
 		DWORD res =
-			WaitForMultipleObjects(count, events, FALSE, INFINITE);
+			WaitForMultipleObjects((DWORD)events.size(), events.data(), FALSE, INFINITE);
 		if (res == WAIT_OBJECT_0)
-			break; // exitEvt is set for exiting thread
+			break; // exitEvent is set for exiting thread
 
 		if (!ReadAllEvents())
 			break;
 	}
 }
 
-#define FLAG_REMOVE_DEVICE 0
-#define FLAG_INSERT_DEVICE 1
+constexpr LONG FLAG_REMOVE_DEVICE = 0;
+constexpr LONG FLAG_INSERT_DEVICE = 1;
 
 bool HDevice::ReadAllEvents()
 {
@@ -121,7 +110,7 @@ bool HDevice::ReadAllEvents()
 
 		eventEx->FreeEventParams(eventCode, param1, param2);
 
-		if (WAIT_OBJECT_0 == WaitForSingleObject(exitEvt, 0))
+		if (WAIT_OBJECT_0 == WaitForSingleObject(exitEvent, 0))
 			return false;
 	}
 
@@ -130,7 +119,7 @@ bool HDevice::ReadAllEvents()
 
 void HDevice::StartEventThread()
 {
-	if (msgThread && (msgThread != INVALID_HANDLE_VALUE)) {
+	if (mediaEventThread && (mediaEventThread != INVALID_HANDLE_VALUE)) {
 		Warning(L"Message thread is running!");
 		return;
 	}
@@ -140,17 +129,17 @@ void HDevice::StartEventThread()
 		return;
 	}
 
-	::ResetEvent(exitEvt);
-	msgThread = (HANDLE)_beginthreadex(0, 0, EventThread, this, 0, 0);
+	::ResetEvent(exitEvent);
+	mediaEventThread = (HANDLE)_beginthreadex(0, 0, EventThread, this, 0, 0);
 }
 
 void HDevice::StopEventThread()
 {
-	::SetEvent(exitEvt);
-	if (msgThread && (msgThread != INVALID_HANDLE_VALUE)) {
-		WaitForSingleObject(msgThread, INFINITE);
-		CloseHandle(msgThread);
-		msgThread = 0;
+	::SetEvent(exitEvent);
+	if (mediaEventThread && (mediaEventThread != INVALID_HANDLE_VALUE)) {
+		WaitForSingleObject(mediaEventThread, INFINITE);
+		CloseHandle(mediaEventThread);
+		mediaEventThread = 0;
 	}
 }
 
@@ -213,28 +202,12 @@ void HDevice::Receive(bool isVideo, IMediaSample *sample)
 	if (isVideo ? !videoConfig.callback : !audioConfig.callback)
 		return;
 
-	if (reactivatePending)
-		return;
-
 	/* auto-rotation for devices such as streamcam */
 	if (isVideo && rotatableDevice) {
 		ComQIPtr<IAMCameraControl> cc(videoFilter);
 		if (cc) {
 			long ccf = 0;
 			cc->Get(CameraControl_Roll, &roll, &ccf);
-		}
-	}
-
-	if (isVideo && videoConfig.reactivateCallback) {
-		ComQIPtr<IKsPropertySet> propertySet(videoFilter);
-		if (propertySet) {
-			const bool hdr = IsVendorVideoHDR(propertySet);
-			if (deviceHdrSignal != hdr) {
-				deviceHdrSignal = hdr;
-				videoConfig.reactivateCallback();
-				reactivatePending = true;
-				return;
-			}
 		}
 	}
 
@@ -443,8 +416,6 @@ bool HDevice::SetupVideoCapture(IBaseFilter *filter, VideoConfig &config)
 		info.expectedSubType = MEDIASUBTYPE_RGB32;
 	else if (videoConfig.format == VideoFormat::ARGB)
 		info.expectedSubType = MEDIASUBTYPE_ARGB32;
-	else if (videoConfig.format == VideoFormat::RGB24)
-		info.expectedSubType = MEDIASUBTYPE_RGB24;
 	else if (videoConfig.format == VideoFormat::YVYU)
 		info.expectedSubType = MEDIASUBTYPE_YVYU;
 	else if (videoConfig.format == VideoFormat::YUY2)
@@ -496,15 +467,6 @@ bool HDevice::SetVideoConfig(VideoConfig *config)
 	if (filter == NULL) {
 		Error(L"Could not get video filter");
 		return false;
-	}
-
-	deviceHdrSignal = false;
-	reactivatePending = false;
-
-	ComPtr<IKsPropertySet> propertySet = ComQIPtr<IKsPropertySet>(filter);
-	if (propertySet) {
-		const bool hdr = IsVendorVideoHDR(propertySet);
-		deviceHdrSignal = hdr;
 	}
 
 	videoConfig = *config;
@@ -644,7 +606,7 @@ bool HDevice::SetupAudioOutput(IBaseFilter *filter, AudioConfig &config)
 	}
 
 	audioFilter = filter;
-	audioOutput = std::move(outputFilter);
+	audioOutput = outputFilter;
 
 	graph->AddFilter(audioOutput, L"Audio Output Filter");
 	if (!config.useVideoDevice)
@@ -734,7 +696,7 @@ bool HDevice::CreateGraph()
 	if (!CreateFilterGraph(&graph, &builder, &control, &eventEx))
 		return false;
 
-	HRESULT hr = eventEx->GetEventHandle((OAEVENT *)&msgEvt);
+	HRESULT hr = eventEx->GetEventHandle((OAEVENT *)&mediaEvent);
 	if (FAILED(hr)) {
 		ErrorHR(L"Failed to get event handle", hr);
 		return false;
@@ -874,11 +836,6 @@ bool HDevice::ConnectFilters()
 		return false;
 
 	if (videoCapture != NULL) {
-		/* use hardware tonemapper for narrow format (SDR), not wide (HDR) */
-		const bool enable_tonemapper = videoConfig.format !=
-					       VideoFormat::P010;
-		SetVendorTonemapperUsage(videoFilter, enable_tonemapper);
-
 		success = ConnectPins(PIN_CATEGORY_CAPTURE, MEDIATYPE_Video,
 				      videoFilter, videoCapture);
 		if (!success) {
@@ -971,4 +928,4 @@ void HDevice::Stop()
 	}
 }
 
-} /* namespace DShow */
+}; /* namespace DShow */
